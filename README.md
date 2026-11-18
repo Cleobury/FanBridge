@@ -80,6 +80,7 @@ Plug in the XIAO, then set:
 | Port | the new COM port |
 | USB CDC On Boot | Enabled |
 | Partition Scheme | **Default with spiffs (3MB APP/1.5MB SPIFFS)** |
+| PSRAM | **OPI PSRAM** (needed for blinds: without it the board runs out of memory and Wi-Fi drops) |
 | Everything else | defaults |
 
 Click **Upload**. If no COM port appears, hold the tiny **B** (boot) button, plug the cable in, release, then upload; press **R** (reset) afterwards.

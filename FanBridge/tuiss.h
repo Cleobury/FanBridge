@@ -229,7 +229,19 @@ static uint8_t frame[24];
 static volatile uint8_t frameLen;
 static volatile uint32_t frameSeq;
 
-inline bool radioBusy() { return radioBusy_; }
+// Radio sharing with FanBridge's fan broadcasts: a fan burst and a blind connection never overlap.
+static portMUX_TYPE radioMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool fanOnAir_ = false;    // FanBridge is broadcasting a fan command
+static volatile bool blindWants_ = false;  // a blind connection is waiting for that burst to end
+inline bool radioBusy() { return radioBusy_ || blindWants_; }
+inline bool claimForFan() {  // FanBridge calls this before starting a burst
+  portENTER_CRITICAL(&radioMux);
+  bool ok = !radioBusy_ && !blindWants_;
+  if (ok) fanOnAir_ = true;
+  portEXIT_CRITICAL(&radioMux);
+  return ok;
+}
+inline void fanDone() { fanOnAir_ = false; }
 inline int busyDevice() { return busyDev; }
 
 inline void signal(int status) {
@@ -392,10 +404,15 @@ inline bool session(int dev, const uint8_t mac[6], const Cmd *cmds, int numCmds,
     addrKnown[dev] = true;
   }
 
-  // 2. take the radio: let any fan broadcast finish, connect
+  // 2. take the radio: block new fan broadcasts, let the current one finish, connect
+  blindWants_ = true;
+  for (uint32_t t = millis(); fanOnAir_ && millis() - t < 2000;) delay(20);
+  portENTER_CRITICAL(&radioMux);
   radioBusy_ = true;
-  for (uint32_t t = millis(); ble_gap_adv_active() && millis() - t < 1500;) delay(20);
+  blindWants_ = false;
+  portEXIT_CRITICAL(&radioMux);
   if (ble_gap_adv_active()) ble_gap_adv_stop();
+  if (ble_gap_disc_active()) ble_gap_disc_cancel();  // a Learn scan would block the connection
 
   int rc = connectTo(knownAddr[dev]);
   if (rc != 0) {
@@ -522,7 +539,7 @@ inline void begin(ble_gap_event_fn *scan, ReadyFn ready, ResultFn result) {
   resultFn = result;
   workSem = xSemaphoreCreateBinary();
   evtSem = xSemaphoreCreateBinary();
-  xTaskCreatePinnedToCore(workerTask, "tuiss", 8192, NULL, 1, &workerHandle, 1);
+  xTaskCreatePinnedToCore(workerTask, "tuiss", 6144, NULL, 1, &workerHandle, 1);
 }
 
 inline void request(int dev, uint8_t want, const uint8_t mac[6], uint8_t openPct = 0) {

@@ -228,10 +228,12 @@ static void serviceRadio() {
   if (burstEnd && (int32_t)(millis() - burstEnd) >= 0) {
     if (ble_gap_adv_active()) ble_gap_adv_stop();
     burstEnd = 0;
+    tuiss::fanDone();
   }
-  if (burstEnd || !bleReady() || tuiss::radioBusy()) return;  // a blind connection has the radio
+  if (burstEnd || !bleReady() || !tuiss::claimForFan()) return;  // a blind connection has (or wants) the radio
   Job j;
   if (dequeue(j) && j.dev < numDevs && devs[j.dev].kind == KIND_FAN) startBurst(j);
+  if (!burstEnd) tuiss::fanDone();  // nothing sent
 }
 
 // Fan speed <-> percentage (6 speeds: 17, 33, 50, 67, 83, 100 %; 3 speeds: 33, 67, 100 %)
@@ -778,6 +780,8 @@ void setup() {
   prefs.begin("fanbridge", false);
   loadDevices();
   selfTestOk = selfTest();
+  if (!ESP.getPsramSize())
+    Serial.println("WARNING: PSRAM is off. Arduino IDE > Tools > PSRAM > OPI PSRAM, then upload again (needed for blinds).");
   Serial.printf("\r\nFanBridge - encoder self-test: %s, %u device(s)\r\n", selfTestOk ? "PASS" : "FAIL", numDevs);
 #if USE_MATTER
   setupMatter();
