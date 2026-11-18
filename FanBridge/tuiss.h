@@ -330,8 +330,8 @@ inline void disconnect() {
 }
 
 // Runs one connection and sends `cmds` in order. Fills r.pos / r.bat from any replies.
-inline bool session(const uint8_t mac[6], const Cmd *cmds, int numCmds, uint8_t openPct, Result &r) {
-  // 1. find the blind's advert (shares the scan with FanBridge's "Learn")
+// Scans (lightly) for the blind's advert and stores its live address in foundAddr.
+inline bool findBlind(const uint8_t mac[6]) {
   drain();
   memcpy(findMac, mac, 6);
   found = false;
@@ -340,25 +340,31 @@ inline bool session(const uint8_t mac[6], const Cmd *cmds, int numCmds, uint8_t 
   while (!found && millis() - t0 < FIND_MS) {
     if (!ble_gap_disc_active()) {
       struct ble_gap_disc_params p = {};
-      p.passive = 0;  // active: the model name is in the scan response
-      p.itvl = 0x50;
-      p.window = 0x30;
+      p.passive = 0;    // active: the model name is in the scan response
+      p.itvl = 0x80;    // 80 ms
+      p.window = 0x20;  // 20 ms: light duty so Wi-Fi (web page, Google Home) keeps working while we look
       ble_gap_disc(BLE_OWN_ADDR_PUBLIC, FIND_MS, &p, scanCb, NULL);
     }
     xSemaphoreTake(evtSem, pdMS_TO_TICKS(250));
   }
   finding = false;
-  if (!found) {
-    snprintf(r.msg, sizeof(r.msg), "Blind not found - out of range?");
-    return false;
-  }
-
-  // 2. take the radio: stop scanning, let any fan broadcast finish, connect
-  radioBusy_ = true;
   ble_gap_disc_cancel();
-  for (uint32_t t = millis(); ble_gap_adv_active() && millis() - t < 1500;) delay(20);
-  if (ble_gap_adv_active()) ble_gap_adv_stop();
+  return found;
+}
 
+// Live BLE address of each blind once found, so later commands connect straight away (no 30 s scan).
+static ble_addr_t knownAddr[MAX_BLINDS];
+static bool addrKnown[MAX_BLINDS];
+
+inline int connectTo(const ble_addr_t &addr) {
+  // Gentle connection settings: Wi-Fi shares the antenna and drops out if Bluetooth hogs it.
+  struct ble_gap_conn_params cp = {};
+  cp.scan_itvl = 0x60;           // 60 ms
+  cp.scan_window = 0x18;         // 15 ms listening while waiting for the blind's advert
+  cp.itvl_min = 0x30;            // 60 ms connection interval
+  cp.itvl_max = 0x50;            // 100 ms
+  cp.latency = 0;
+  cp.supervision_timeout = 400;  // 4 s
   int rc = -1;
   for (int attempt = 0; attempt < 2 && rc != 0; attempt++) {
     if (attempt) {
@@ -366,10 +372,34 @@ inline bool session(const uint8_t mac[6], const Cmd *cmds, int numCmds, uint8_t 
       delay(300);
     }
     drain();
-    rc = await(ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &foundAddr, CONNECT_MS, NULL, connEvent, NULL), CONNECT_MS + 1500);
+    rc = await(ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &addr, CONNECT_MS, &cp, connEvent, NULL), CONNECT_MS + 1500);
   }
   if (rc != 0 || conn == BLE_HS_CONN_HANDLE_NONE) {
     ble_gap_conn_cancel();
+    return rc ? rc : -1;
+  }
+  return 0;
+}
+
+inline bool session(int dev, const uint8_t mac[6], const Cmd *cmds, int numCmds, uint8_t openPct, Result &r) {
+  // 1. find the blind's advert, unless its address is already known
+  if (!addrKnown[dev]) {
+    if (!findBlind(mac)) {
+      snprintf(r.msg, sizeof(r.msg), "Blind not found - out of range?");
+      return false;
+    }
+    knownAddr[dev] = foundAddr;
+    addrKnown[dev] = true;
+  }
+
+  // 2. take the radio: let any fan broadcast finish, connect
+  radioBusy_ = true;
+  for (uint32_t t = millis(); ble_gap_adv_active() && millis() - t < 1500;) delay(20);
+  if (ble_gap_adv_active()) ble_gap_adv_stop();
+
+  int rc = connectTo(knownAddr[dev]);
+  if (rc != 0) {
+    addrKnown[dev] = false;  // it may have changed address: look for it again next time
     snprintf(r.msg, sizeof(r.msg), "Connect failed (%d)", rc);
     radioBusy_ = false;
     return false;
@@ -444,6 +474,9 @@ inline bool session(const uint8_t mac[6], const Cmd *cmds, int numCmds, uint8_t 
   return ok;
 }
 
+static TaskHandle_t workerHandle = NULL;
+inline uint32_t workerStackFree() { return workerHandle ? uxTaskGetStackHighWaterMark(workerHandle) : 0; }
+
 static void workerTask(void *) {
   for (;;) {
     xSemaphoreTake(workSem, pdMS_TO_TICKS(1000));
@@ -465,13 +498,13 @@ static void workerTask(void *) {
       busyDev = i;
       if (take == W_STOP) {
         const Cmd c[] = {C_STOP, C_GET_POS};
-        r.ok = session(p.mac, c, 2, 0, r);
+        r.ok = session(i, p.mac, c, 2, 0, r);
       } else if (take == W_SET) {
         const Cmd c[] = {C_SET_OPEN};
-        r.ok = session(p.mac, c, 1, p.openPct, r);
+        r.ok = session(i, p.mac, c, 1, p.openPct, r);
       } else {
         const Cmd c[] = {C_GET_POS, C_GET_BAT};
-        r.ok = session(p.mac, c, 2, 0, r);
+        r.ok = session(i, p.mac, c, 2, 0, r);
       }
       if (r.ok && !r.msg[0]) snprintf(r.msg, sizeof(r.msg), "OK");
       busyDev = -1;
@@ -489,13 +522,14 @@ inline void begin(ble_gap_event_fn *scan, ReadyFn ready, ResultFn result) {
   resultFn = result;
   workSem = xSemaphoreCreateBinary();
   evtSem = xSemaphoreCreateBinary();
-  xTaskCreatePinnedToCore(workerTask, "tuiss", 6144, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(workerTask, "tuiss", 8192, NULL, 1, &workerHandle, 1);
 }
 
 inline void request(int dev, uint8_t want, const uint8_t mac[6], uint8_t openPct = 0) {
   if (dev < 0 || dev >= MAX_BLINDS) return;
   portENTER_CRITICAL(&pendMux);
   Pending &p = pend[dev];
+  if (memcmp(p.mac, mac, 6)) addrKnown[dev] = false;  // new blind ID (or list changed): find it again
   memcpy(p.mac, mac, 6);
   if (want & W_STOP) p.want &= ~W_SET;  // stop cancels a queued move
   if (want & W_SET) p.want &= ~W_STOP, p.openPct = openPct;

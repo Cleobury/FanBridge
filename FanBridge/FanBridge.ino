@@ -159,6 +159,7 @@ static bool isLearning() { return learnEnd && (int32_t)(learnEnd - millis()) > 0
 static int gapEvent(struct ble_gap_event *e, void *) {
   if (e->type == BLE_GAP_EVENT_DISC) {
     tuiss::onAdvert(e->disc);
+    if (!isLearning()) return 0;  // fan remotes only matter while learning: skip the decode work otherwise
     Decoded d;
     if (decode(e->disc.data, e->disc.length_data, d)) {
       portENTER_CRITICAL(&mux);
@@ -186,8 +187,8 @@ static void scanFor(uint32_t ms) {
   if (ble_gap_disc_active() || tuiss::radioBusy()) return;
   struct ble_gap_disc_params p = {};
   p.passive = 0;  // active, so Tuiss blinds' names (scan responses) show up too
-  p.itvl = 0x60;
-  p.window = 0x50;
+  p.itvl = 0x80;    // 80 ms
+  p.window = 0x20;  // listen 20 ms in every 80: Wi-Fi shares the antenna, so keep scanning light
   ble_gap_disc(BLE_OWN_ADDR_PUBLIC, ms, &p, gapEvent, NULL);
 }
 
@@ -800,6 +801,9 @@ void loop() {
       lastIp = ip;
       Serial.printf("Web page: http://%s/\r\n", ip.c_str());
     }
+    Serial.printf("Free memory: %u (lowest %u), PSRAM free %u, blind task stack left %u%s\r\n", ESP.getFreeHeap(),
+                  ESP.getMinFreeHeap(), ESP.getFreePsram(), tuiss::workerStackFree(),
+                  tuiss::busyDevice() >= 0 ? ", blind busy" : "");
 #if USE_MATTER
     if (!Matter.isDeviceCommissioned()) {
       Serial.println("Not in Google Home yet: Google Home app > + > Device > Matter-enabled device.");
