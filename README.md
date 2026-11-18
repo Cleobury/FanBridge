@@ -1,12 +1,13 @@
 # FanBridge
 
-**Control Philips Bliss ceiling fans (and other "FanLamp Pro" fans) from Google Home and a web page, using a £10 ESP32 board.**
+**Control Philips Bliss ceiling fans (and other "FanLamp Pro" fans) and Tuiss smart blinds from Google Home and a web page, using a £10 ESP32 board.**
 
 The Philips Bliss fan ceiling light (for example [8720169279087](https://www.lighting.philips.co.uk/consumer/p/fan-ceiling-lights-bliss-fan-ceiling-light-35-28-w/8720169279087)) ships with a 2.4 GHz remote. It isn't a proprietary radio or a Bluetooth connection: the remote **broadcasts Bluetooth LE advertisements** in the "FanLamp Pro" format used by many fan lights. FanBridge runs on a Seeed XIAO ESP32-S3, broadcasts the same packets, and makes your fans appear in **Google Home** (via Matter) and on a **web page** on your Wi-Fi.
 
 - Light on/off, brightness, warm/cool white
 - Fan off + speeds 1–6 (or 1–3), forward/reverse
-- Up to 8 fans from one board
+- **Tuiss SmartView blinds**: open / close / stop / set position, position and battery read-back
+- Up to 8 devices (fans and blinds) from one board
 - Clone your existing remote (no pairing) **or** pair FanBridge as a new remote
 - Your original remote and the FanLamp Pro app keep working
 
@@ -24,6 +25,7 @@ The Philips Bliss fan ceiling light (for example [8720169279087](https://www.lig
 | Multiple devices | ✅ verified |
 | Brightness / colour temperature | implemented; depends on your fan model |
 | Pairing a new random ID, "Learn" button, LampSmart Pro variants | implemented from the protocol; less tested |
+| Tuiss blinds (web page + Google Home) | **new, not yet tested on hardware** – protocol from TuissESP (verified there on a TS5001) |
 
 ---
 
@@ -37,6 +39,7 @@ The Philips Bliss fan ceiling light (for example [8720169279087](https://www.lig
 | Google Nest speaker, display or hub | Acts as the Matter controller. Not needed for web-only mode |
 | 2.4 GHz Wi-Fi | The ESP32-S3 has no 5 GHz radio. WPA2 or WPA2/WPA3 mixed |
 | A PC with [Arduino IDE 2.x](https://www.arduino.cc/en/software) | |
+| *(Optional)* Tuiss SmartView blinds | TS3000, TS5200, TS5300, TS2600, TS2900, TS5001, TS5101. You need each blind's ID from its label |
 | *(Optional)* Android phone with **nRF Connect** | To check your fan uses this protocol, and for debugging |
 
 ### Check your fan is compatible (2 minutes, optional)
@@ -113,6 +116,16 @@ FanBridge starts with one device called **"Ceiling fan"**. Give it an identity t
 
 Now test the light and fan buttons on the web page, then from Google Home ("Hey Google, turn on the bedroom fan light", "set the bedroom fan to 50%").
 
+### Adding Tuiss blinds
+Blinds need no pairing: FanBridge connects to each blind over Bluetooth whenever it sends a command (that's how the Tuiss app works too), so every command takes a few seconds.
+
+1. Find the **blind ID** – a MAC-style code such as `AA:BB:CC:DD:EE:FF` on the label on the motor or bracket (also shown in the Tuiss app). It is *not* always the address nRF Connect shows.
+2. On the web page, under **Add a device**, set **Type → Tuiss smart blind**, enter a name, the blind ID and the model (e.g. TS5001), and press **Add device**. (Tip: **Listen 20 s** lists Tuiss blinds in range with their advert data – your label's ID appears inside it, and **Add blind** fills in the model.)
+3. FanBridge immediately reads the blind's position and battery. The card shows *Working…* and then the result, e.g. `OK` or `Blind not found - out of range?`.
+4. Press **Reboot now** so Google Home gets the new blind. It appears as a **window covering**: "Hey Google, open the bedroom blind", "set the bedroom blind to 30%", "close all the blinds". If it doesn't appear, remove FanBridge from Google Home and add it again.
+
+Blind positions are read back at boot and every 30 minutes (`BLIND_REFRESH_MIN`), so changes made with the Tuiss app or remote show up eventually; press **Refresh** on the card to read it straight away.
+
 ### Adding more fans
 1. Use **Learn → Add as new**, or fill in **Add a device** (blank ID = new random ID, then **Pair**).
 2. Press **Reboot now** when the banner asks – new devices only reach Google Home after a restart.
@@ -134,6 +147,9 @@ Each device is a **light** (on/off, brightness, colour temperature) and a **fan*
 
 Low / Medium / High → speeds 2 / 3 / 6. "Turn on the fan" restores the last speed.
 
+### Blinds
+Each blind card has an **Open %** slider (Tuiss and the web page count percent *open*; Google Home shows the same position), **Open / Stop / Close**, **Refresh** (reads position and battery) and a battery badge. Google Home: open, close, set a percentage, stop.
+
 ### BOOT button on the XIAO
 - Short press: toggle the first device's light
 - Hold 5 s: remove FanBridge from Google Home (so it can be added again)
@@ -146,11 +162,13 @@ Low / Medium / High → speeds 2 / 3 / 6. "Turn on the fan" restores the last sp
 | `MIREDS_COLD` / `MIREDS_WARM` | `153` / `370` | Colour-temperature range (6500 K / 2700 K) |
 | `BURST_MS` | `800` | How long each command is broadcast |
 | `LEARN_MS` | `20000` | How long Learn listens |
+| `BLIND_REFRESH_MIN` | `30` | Re-read blind positions this often (minutes, 0 = off) |
 
 ### Limitations
 - **One-way radio.** The fan never reports its state. If you use the physical remote, the web page and Google Home won't know.
 - Pairing, Learn and sending only work once FanBridge has been added to Google Home (Matter needs Bluetooth during setup). In `USE_MATTER 0` mode they work as soon as it boots.
 - Changing the device list needs a reboot before Google Home sees it.
+- Blinds take a few seconds per command (scan, connect, send, disconnect). While a blind connection is open, fan commands wait.
 
 ---
 
@@ -166,6 +184,8 @@ Low / Medium / High → speeds 2 / 3 / 6. "Turn on the fan" restores the last sp
 | `Google Home -> … (IGNORED: device list changed…)` | Press **Reboot now** on the web page |
 | No `Google Home ->` line when you use Google Home | Commands aren't reaching FanBridge – see the two rows above; check Google shows the device online |
 | `TX … sent` but the fan does nothing | Move the XIAO closer; check the device's ID/packet type (use Learn); try **Pair**; confirm with nRF Connect that FanBridge's packets appear |
+| Blind card shows `Blind not found - out of range?` | Check the blind ID against the label; move the XIAO closer; press **Listen 20 s** to see whether the blind appears at all. Some blinds sleep – moving it with its own remote wakes it |
+| Blind shows `Connect failed` / `Subscribe failed` | Usually range; try again. Make sure the Tuiss app isn't connected to the blind at the same moment |
 | `TX … FAILED (rc=…)` | Bluetooth not ready – reboot; report the `rc` number |
 | `Guru Meditation Error` / reboot loop | Please open an issue with the full backtrace and the `ELF file SHA256` line |
 | `E (…) wifi:sta is connecting, return error` at boot | Harmless |
@@ -176,10 +196,12 @@ Low / Medium / High → speeds 2 / 3 / 6. "Turn on the fan" restores the last sp
 
 Every remote button press is broadcast for a moment as a 31-byte BLE advertisement. The payload is whitened with a seed-dependent table, signed with a 16-bit AES-derived value, and protected by a CRC-16. Inside is a remote ID, a group index, a rolling counter and a command byte (`0x10` light on, `0x31` fan speed, …). The fan obeys any sender whose ID it has paired with. FanBridge re-creates these packets exactly. See **[docs/PROTOCOL.md](docs/PROTOCOL.md)** for the full format.
 
+Tuiss blinds are different: each command is a short BLE **connection** – scan for the blind's advert (matched by the ID on its label), connect, subscribe to notifications, send a keepalive and a timestamp, send the command, read the reply, disconnect. See **[docs/TUISS.md](docs/TUISS.md)**.
+
 ```
-Google Home ──Matter/Wi-Fi──┐
-                             ├──> XIAO ESP32-S3 (FanBridge) ──BLE adverts──> fan
-Phone browser ──HTTP/Wi-Fi──┘
+Google Home ──Matter/Wi-Fi──┐                               ┌──BLE adverts─────> fans
+                             ├──> XIAO ESP32-S3 (FanBridge) ─┤
+Phone browser ──HTTP/Wi-Fi──┘                               └──BLE connections─> Tuiss blinds
 ```
 
 ## Repository layout
@@ -188,16 +210,18 @@ Phone browser ──HTTP/Wi-Fi──┘
 FanBridge/            Arduino sketch (open FanBridge.ino)
   FanBridge.ino       devices, Matter (Google Home), web API, radio queue
   fanlamp.h           packet encoder/decoder + self-test against real captures
+  tuiss.h             Tuiss blind driver (BLE GATT client on the shared NimBLE stack)
   web_ui.h            the web page
   types.h             shared structs
 tools/
   fan_decode.py       decode captures pasted from nRF Connect
   fan_encode.py       reference encoder; checks itself against real/reference packets
-docs/PROTOCOL.md      the over-the-air format
+docs/PROTOCOL.md      the fan over-the-air format
+docs/TUISS.md         the Tuiss blind protocol
 ```
 
 ## Credits and licence
 
-The packet format (whitening table, signature and command set) was worked out by the [ha-ble-adv](https://github.com/NicoIIT/ha-ble-adv) project by @NicoIIT (MIT licence); FanBridge is an independent implementation verified against captures from a Philips Bliss remote. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The packet format (whitening table, signature and command set) was worked out by the [ha-ble-adv](https://github.com/NicoIIT/ha-ble-adv) project by @NicoIIT (MIT licence); FanBridge is an independent implementation verified against captures from a Philips Bliss remote. The Tuiss blind protocol comes from [TuissESP](https://github.com/ba1i95/TuissESP) by Callum Wallace (MIT licence). See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Philips is a trademark of Koninklijke Philips N.V.; this project is not affiliated with, endorsed by, or supported by Philips or Signify.
